@@ -1,3 +1,4 @@
 /vendor/
 composer.lock
 *.opa
+.phpunit.result.cache
