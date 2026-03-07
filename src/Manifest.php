@@ -8,6 +8,7 @@ namespace OPA;
  * Represents the META-INF/MANIFEST.MF file in an OPA archive.
  *
  * Follows the JAR manifest format: Name: Value pairs, 72-byte line limit.
+ * Supports per-entry sections for signing.
  */
 class Manifest
 {
@@ -24,6 +25,14 @@ class Manifest
     private string $dataRoot = 'data/';
     private string $executionMode = 'interactive';
     private ?string $schemaExtensions = null;
+
+    /**
+     * Per-entry sections: archive path => array of field name => value.
+     * Used for signing (e.g., SHA-256-Digest per entry).
+     *
+     * @var array<string, array<string, string>>
+     */
+    private array $entrySections = [];
 
     public function getPromptFile(): string
     {
@@ -141,6 +150,38 @@ class Manifest
     }
 
     /**
+     * Set a per-entry section (used by signing to store digests).
+     *
+     * @param string $name Archive entry path (e.g. "prompt.md")
+     * @param array<string, string> $fields Field name => value pairs
+     */
+    public function setEntrySection(string $name, array $fields): self
+    {
+        $this->entrySections[$name] = $fields;
+        return $this;
+    }
+
+    /**
+     * Get a per-entry section.
+     *
+     * @return array<string, string>|null
+     */
+    public function getEntrySection(string $name): ?array
+    {
+        return $this->entrySections[$name] ?? null;
+    }
+
+    /**
+     * Get all per-entry sections.
+     *
+     * @return array<string, array<string, string>>
+     */
+    public function getEntrySections(): array
+    {
+        return $this->entrySections;
+    }
+
+    /**
      * Serialize the manifest to the JAR manifest format string.
      */
     public function toString(): string
@@ -178,7 +219,18 @@ class Manifest
             $lines[] = self::formatLine('Schema-Extensions', $this->schemaExtensions);
         }
 
-        return implode("\r\n", $lines) . "\r\n";
+        $result = implode("\r\n", $lines) . "\r\n";
+
+        // Append per-entry sections (separated by blank lines)
+        foreach ($this->entrySections as $name => $fields) {
+            $result .= "\r\n";
+            $result .= self::formatLine('Name', $name) . "\r\n";
+            foreach ($fields as $fieldName => $fieldValue) {
+                $result .= self::formatLine($fieldName, $fieldValue) . "\r\n";
+            }
+        }
+
+        return $result;
     }
 
     /**
@@ -187,37 +239,53 @@ class Manifest
     public static function parse(string $content): self
     {
         $manifest = new self();
-        $fields = self::parseFields($content);
+        $sections = self::parseSections($content);
 
-        if (isset($fields['Prompt-File'])) {
-            $manifest->promptFile = $fields['Prompt-File'];
+        // Main section
+        if (!empty($sections)) {
+            $mainFields = $sections[0]['fields'];
+
+            if (isset($mainFields['Prompt-File'])) {
+                $manifest->promptFile = $mainFields['Prompt-File'];
+            }
+            if (isset($mainFields['Created-By'])) {
+                $manifest->createdBy = $mainFields['Created-By'];
+            }
+            if (isset($mainFields['Created-At'])) {
+                $manifest->createdAt = $mainFields['Created-At'];
+            }
+            if (isset($mainFields['Title'])) {
+                $manifest->title = $mainFields['Title'];
+            }
+            if (isset($mainFields['Description'])) {
+                $manifest->description = $mainFields['Description'];
+            }
+            if (isset($mainFields['Agent-Hint'])) {
+                $manifest->agentHint = $mainFields['Agent-Hint'];
+            }
+            if (isset($mainFields['Session-File'])) {
+                $manifest->sessionFile = $mainFields['Session-File'];
+            }
+            if (isset($mainFields['Data-Root'])) {
+                $manifest->dataRoot = $mainFields['Data-Root'];
+            }
+            if (isset($mainFields['Execution-Mode'])) {
+                $manifest->executionMode = $mainFields['Execution-Mode'];
+            }
+            if (isset($mainFields['Schema-Extensions'])) {
+                $manifest->schemaExtensions = $mainFields['Schema-Extensions'];
+            }
         }
-        if (isset($fields['Created-By'])) {
-            $manifest->createdBy = $fields['Created-By'];
-        }
-        if (isset($fields['Created-At'])) {
-            $manifest->createdAt = $fields['Created-At'];
-        }
-        if (isset($fields['Title'])) {
-            $manifest->title = $fields['Title'];
-        }
-        if (isset($fields['Description'])) {
-            $manifest->description = $fields['Description'];
-        }
-        if (isset($fields['Agent-Hint'])) {
-            $manifest->agentHint = $fields['Agent-Hint'];
-        }
-        if (isset($fields['Session-File'])) {
-            $manifest->sessionFile = $fields['Session-File'];
-        }
-        if (isset($fields['Data-Root'])) {
-            $manifest->dataRoot = $fields['Data-Root'];
-        }
-        if (isset($fields['Execution-Mode'])) {
-            $manifest->executionMode = $fields['Execution-Mode'];
-        }
-        if (isset($fields['Schema-Extensions'])) {
-            $manifest->schemaExtensions = $fields['Schema-Extensions'];
+
+        // Named entry sections
+        for ($i = 1; $i < count($sections); $i++) {
+            $section = $sections[$i];
+            if (isset($section['fields']['Name'])) {
+                $name = $section['fields']['Name'];
+                $fields = $section['fields'];
+                unset($fields['Name']);
+                $manifest->entrySections[$name] = $fields;
+            }
         }
 
         return $manifest;
@@ -226,7 +294,7 @@ class Manifest
     /**
      * Format a single manifest line, wrapping at 72 bytes per the JAR spec.
      */
-    private static function formatLine(string $name, string $value): string
+    public static function formatLine(string $name, string $value): string
     {
         $line = "$name: $value";
         if (strlen($line) <= 72) {
@@ -247,11 +315,34 @@ class Manifest
     }
 
     /**
-     * Parse JAR manifest fields, handling continuation lines.
+     * Parse JAR manifest into sections. Each section is an array with 'fields'.
+     * The first section is the main section; subsequent sections are named entry sections.
+     *
+     * @return array<int, array{fields: array<string, string>}>
+     */
+    public static function parseSections(string $content): array
+    {
+        $sections = [];
+        // Split on blank lines (handling both \r\n and \n)
+        $rawSections = preg_split('/\r?\n\r?\n/', $content);
+
+        foreach ($rawSections as $rawSection) {
+            $rawSection = trim($rawSection);
+            if ($rawSection === '') {
+                continue;
+            }
+            $sections[] = ['fields' => self::parseFields($rawSection)];
+        }
+
+        return $sections;
+    }
+
+    /**
+     * Parse JAR manifest fields from a single section, handling continuation lines.
      *
      * @return array<string, string>
      */
-    private static function parseFields(string $content): array
+    public static function parseFields(string $content): array
     {
         $fields = [];
         $lines = preg_split('/\r?\n/', $content);
@@ -260,14 +351,10 @@ class Manifest
 
         foreach ($lines as $line) {
             if ($line === '') {
-                // Section break - stop at main section
-                if ($currentName !== null) {
-                    $fields[$currentName] = $currentValue;
-                }
                 break;
             }
 
-            if ($line[0] === ' ') {
+            if (isset($line[0]) && $line[0] === ' ') {
                 // Continuation line
                 if ($currentName !== null) {
                     $currentValue .= substr($line, 1);
@@ -293,5 +380,20 @@ class Manifest
         }
 
         return $fields;
+    }
+
+    /**
+     * Serialize a single section (for digest computation).
+     *
+     * @param string $name Entry name
+     * @param array<string, string> $fields
+     */
+    public static function formatSection(string $name, array $fields): string
+    {
+        $result = self::formatLine('Name', $name) . "\r\n";
+        foreach ($fields as $fieldName => $fieldValue) {
+            $result .= self::formatLine($fieldName, $fieldValue) . "\r\n";
+        }
+        return $result;
     }
 }

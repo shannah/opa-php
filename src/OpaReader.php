@@ -129,6 +129,14 @@ class OpaReader
         $this->zip->extractTo($directory);
     }
 
+    /**
+     * Check if the archive is signed.
+     */
+    public function isSigned(): bool
+    {
+        return $this->zip->locateName('META-INF/SIGNATURE.SF') !== false;
+    }
+
     public function close(): void
     {
         $this->zip->close();

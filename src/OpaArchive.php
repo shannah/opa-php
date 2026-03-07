@@ -105,9 +105,11 @@ class OpaArchive
     }
 
     /**
-     * Save the OPA archive to a file.
+     * Save the OPA archive to a file, optionally signing it.
+     *
+     * @param Signer|null $signer If provided, the archive will be signed after creation.
      */
-    public function save(string $outputPath): void
+    public function save(string $outputPath, ?Signer $signer = null): void
     {
         $zip = new \ZipArchive();
         $result = $zip->open($outputPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE);
@@ -152,6 +154,10 @@ class OpaArchive
         }
 
         $zip->close();
+
+        if ($signer !== null) {
+            $signer->sign($outputPath);
+        }
     }
 
     /**
